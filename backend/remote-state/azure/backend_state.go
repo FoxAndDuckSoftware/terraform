@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/state"
-	"github.com/hashicorp/terraform/state/remote"
 	"github.com/hashicorp/terraform/states"
+	"github.com/hashicorp/terraform/states/remote"
+	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/tombuildsstuff/giovanni/storage/2018-11-09/blob/blobs"
 	"github.com/tombuildsstuff/giovanni/storage/2018-11-09/blob/containers"
 )
@@ -78,7 +78,7 @@ func (b *Backend) DeleteWorkspace(name string) error {
 	return nil
 }
 
-func (b *Backend) StateMgr(name string) (state.State, error) {
+func (b *Backend) StateMgr(name string) (statemgr.Full, error) {
 	ctx := context.TODO()
 	blobClient, err := b.armClient.getBlobClient(ctx)
 	if err != nil {
@@ -95,11 +95,15 @@ func (b *Backend) StateMgr(name string) (state.State, error) {
 
 	stateMgr := &remote.State{Client: client}
 
+	// Grab the value
+	if err := stateMgr.RefreshState(); err != nil {
+		return nil, err
+	}
 	//if this isn't the default state name, we need to create the object so
 	//it's listed by States.
-	if name != backend.DefaultStateName {
+	if v := stateMgr.State(); v == nil {
 		// take a lock on this state while we write it
-		lockInfo := state.NewLockInfo()
+		lockInfo := statemgr.NewLockInfo()
 		lockInfo.Operation = "init"
 		lockId, err := client.Lock(lockInfo)
 		if err != nil {
@@ -119,9 +123,10 @@ func (b *Backend) StateMgr(name string) (state.State, error) {
 			err = lockUnlock(err)
 			return nil, err
 		}
-
-		// If we have no state, we have to create an empty state
+		//if this isn't the default state name, we need to create the object so
+		//it's listed by States.
 		if v := stateMgr.State(); v == nil {
+			// If we have no state, we have to create an empty state
 			if err := stateMgr.WriteState(states.NewState()); err != nil {
 				err = lockUnlock(err)
 				return nil, err
@@ -130,13 +135,12 @@ func (b *Backend) StateMgr(name string) (state.State, error) {
 				err = lockUnlock(err)
 				return nil, err
 			}
-		}
 
-		// Unlock, the state should now be initialized
-		if err := lockUnlock(nil); err != nil {
-			return nil, err
+			// Unlock, the state should now be initialized
+			if err := lockUnlock(nil); err != nil {
+				return nil, err
+			}
 		}
-
 	}
 
 	return stateMgr, nil

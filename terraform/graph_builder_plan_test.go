@@ -16,23 +16,16 @@ func TestPlanGraphBuilder_impl(t *testing.T) {
 
 func TestPlanGraphBuilder(t *testing.T) {
 	awsProvider := &MockProvider{
-		GetSchemaReturn: &ProviderSchema{
-			Provider: simpleTestSchema(),
-			ResourceTypes: map[string]*configschema.Block{
-				"aws_security_group": simpleTestSchema(),
-				"aws_instance":       simpleTestSchema(),
-				"aws_load_balancer":  simpleTestSchema(),
+		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+			Provider: providers.Schema{Block: simpleTestSchema()},
+			ResourceTypes: map[string]providers.Schema{
+				"aws_security_group": {Block: simpleTestSchema()},
+				"aws_instance":       {Block: simpleTestSchema()},
+				"aws_load_balancer":  {Block: simpleTestSchema()},
 			},
 		},
 	}
-	openstackProvider := &MockProvider{
-		GetSchemaReturn: &ProviderSchema{
-			Provider: simpleTestSchema(),
-			ResourceTypes: map[string]*configschema.Block{
-				"openstack_floating_ip": simpleTestSchema(),
-			},
-		},
-	}
+	openstackProvider := mockProviderWithResourceTypeSchema("openstack_floating_ip", simpleTestSchema())
 	components := &basicComponentFactory{
 		providers: map[addrs.Provider]providers.Factory{
 			addrs.NewDefaultProvider("aws"):       providers.FactoryFixed(awsProvider),
@@ -45,11 +38,10 @@ func TestPlanGraphBuilder(t *testing.T) {
 		Components: components,
 		Schemas: &Schemas{
 			Providers: map[addrs.Provider]*ProviderSchema{
-				addrs.NewDefaultProvider("aws"):       awsProvider.GetSchemaReturn,
-				addrs.NewDefaultProvider("openstack"): openstackProvider.GetSchemaReturn,
+				addrs.NewDefaultProvider("aws"):       awsProvider.ProviderSchema(),
+				addrs.NewDefaultProvider("openstack"): openstackProvider.ProviderSchema(),
 			},
 		},
-		DisableReduce: true,
 	}
 
 	g, err := b.Build(addrs.RootModuleInstance)
@@ -69,28 +61,22 @@ func TestPlanGraphBuilder(t *testing.T) {
 }
 
 func TestPlanGraphBuilder_dynamicBlock(t *testing.T) {
-	provider := &MockProvider{
-		GetSchemaReturn: &ProviderSchema{
-			ResourceTypes: map[string]*configschema.Block{
-				"test_thing": {
+	provider := mockProviderWithResourceTypeSchema("test_thing", &configschema.Block{
+		Attributes: map[string]*configschema.Attribute{
+			"id":   {Type: cty.String, Computed: true},
+			"list": {Type: cty.List(cty.String), Computed: true},
+		},
+		BlockTypes: map[string]*configschema.NestedBlock{
+			"nested": {
+				Nesting: configschema.NestingList,
+				Block: configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
-						"id":   {Type: cty.String, Computed: true},
-						"list": {Type: cty.List(cty.String), Computed: true},
-					},
-					BlockTypes: map[string]*configschema.NestedBlock{
-						"nested": {
-							Nesting: configschema.NestingList,
-							Block: configschema.Block{
-								Attributes: map[string]*configschema.Attribute{
-									"foo": {Type: cty.String, Optional: true},
-								},
-							},
-						},
+						"foo": {Type: cty.String, Optional: true},
 					},
 				},
 			},
 		},
-	}
+	})
 	components := &basicComponentFactory{
 		providers: map[addrs.Provider]providers.Factory{
 			addrs.NewDefaultProvider("test"): providers.FactoryFixed(provider),
@@ -102,10 +88,9 @@ func TestPlanGraphBuilder_dynamicBlock(t *testing.T) {
 		Components: components,
 		Schemas: &Schemas{
 			Providers: map[addrs.Provider]*ProviderSchema{
-				addrs.NewDefaultProvider("test"): provider.GetSchemaReturn,
+				addrs.NewDefaultProvider("test"): provider.ProviderSchema(),
 			},
 		},
-		DisableReduce: true,
 	}
 
 	g, err := b.Build(addrs.RootModuleInstance)
@@ -125,15 +110,9 @@ func TestPlanGraphBuilder_dynamicBlock(t *testing.T) {
 	actual := strings.TrimSpace(g.String())
 	expected := strings.TrimSpace(`
 meta.count-boundary (EachMode fixup)
-  provider["registry.terraform.io/hashicorp/test"]
-  test_thing.a (expand)
-  test_thing.b (expand)
   test_thing.c (expand)
 provider["registry.terraform.io/hashicorp/test"]
 provider["registry.terraform.io/hashicorp/test"] (close)
-  provider["registry.terraform.io/hashicorp/test"]
-  test_thing.a (expand)
-  test_thing.b (expand)
   test_thing.c (expand)
 root
   meta.count-boundary (EachMode fixup)
@@ -143,7 +122,6 @@ test_thing.a (expand)
 test_thing.b (expand)
   provider["registry.terraform.io/hashicorp/test"]
 test_thing.c (expand)
-  provider["registry.terraform.io/hashicorp/test"]
   test_thing.a (expand)
   test_thing.b (expand)
 `)
@@ -153,23 +131,17 @@ test_thing.c (expand)
 }
 
 func TestPlanGraphBuilder_attrAsBlocks(t *testing.T) {
-	provider := &MockProvider{
-		GetSchemaReturn: &ProviderSchema{
-			ResourceTypes: map[string]*configschema.Block{
-				"test_thing": {
-					Attributes: map[string]*configschema.Attribute{
-						"id": {Type: cty.String, Computed: true},
-						"nested": {
-							Type: cty.List(cty.Object(map[string]cty.Type{
-								"foo": cty.String,
-							})),
-							Optional: true,
-						},
-					},
-				},
+	provider := mockProviderWithResourceTypeSchema("test_thing", &configschema.Block{
+		Attributes: map[string]*configschema.Attribute{
+			"id": {Type: cty.String, Computed: true},
+			"nested": {
+				Type: cty.List(cty.Object(map[string]cty.Type{
+					"foo": cty.String,
+				})),
+				Optional: true,
 			},
 		},
-	}
+	})
 	components := &basicComponentFactory{
 		providers: map[addrs.Provider]providers.Factory{
 			addrs.NewDefaultProvider("test"): providers.FactoryFixed(provider),
@@ -181,10 +153,9 @@ func TestPlanGraphBuilder_attrAsBlocks(t *testing.T) {
 		Components: components,
 		Schemas: &Schemas{
 			Providers: map[addrs.Provider]*ProviderSchema{
-				addrs.NewDefaultProvider("test"): provider.GetSchemaReturn,
+				addrs.NewDefaultProvider("test"): provider.ProviderSchema(),
 			},
 		},
-		DisableReduce: true,
 	}
 
 	g, err := b.Build(addrs.RootModuleInstance)
@@ -204,13 +175,9 @@ func TestPlanGraphBuilder_attrAsBlocks(t *testing.T) {
 	actual := strings.TrimSpace(g.String())
 	expected := strings.TrimSpace(`
 meta.count-boundary (EachMode fixup)
-  provider["registry.terraform.io/hashicorp/test"]
-  test_thing.a (expand)
   test_thing.b (expand)
 provider["registry.terraform.io/hashicorp/test"]
 provider["registry.terraform.io/hashicorp/test"] (close)
-  provider["registry.terraform.io/hashicorp/test"]
-  test_thing.a (expand)
   test_thing.b (expand)
 root
   meta.count-boundary (EachMode fixup)
@@ -218,7 +185,6 @@ root
 test_thing.a (expand)
   provider["registry.terraform.io/hashicorp/test"]
 test_thing.b (expand)
-  provider["registry.terraform.io/hashicorp/test"]
   test_thing.a (expand)
 `)
 	if actual != expected {
@@ -248,14 +214,7 @@ func TestPlanGraphBuilder_targetModule(t *testing.T) {
 }
 
 func TestPlanGraphBuilder_forEach(t *testing.T) {
-	awsProvider := &MockProvider{
-		GetSchemaReturn: &ProviderSchema{
-			Provider: simpleTestSchema(),
-			ResourceTypes: map[string]*configschema.Block{
-				"aws_instance": simpleTestSchema(),
-			},
-		},
-	}
+	awsProvider := mockProviderWithResourceTypeSchema("aws_instance", simpleTestSchema())
 
 	components := &basicComponentFactory{
 		providers: map[addrs.Provider]providers.Factory{
@@ -268,10 +227,9 @@ func TestPlanGraphBuilder_forEach(t *testing.T) {
 		Components: components,
 		Schemas: &Schemas{
 			Providers: map[addrs.Provider]*ProviderSchema{
-				addrs.NewDefaultProvider("aws"): awsProvider.GetSchemaReturn,
+				addrs.NewDefaultProvider("aws"): awsProvider.ProviderSchema(),
 			},
 		},
-		DisableReduce: true,
 	}
 
 	g, err := b.Build(addrs.RootModuleInstance)
@@ -295,40 +253,27 @@ func TestPlanGraphBuilder_forEach(t *testing.T) {
 const testPlanGraphBuilderStr = `
 aws_instance.web (expand)
   aws_security_group.firewall (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
   var.foo
 aws_load_balancer.weblb (expand)
   aws_instance.web (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
 aws_security_group.firewall (expand)
   provider["registry.terraform.io/hashicorp/aws"]
 local.instance_id (expand)
   aws_instance.web (expand)
 meta.count-boundary (EachMode fixup)
-  aws_instance.web (expand)
   aws_load_balancer.weblb (expand)
-  aws_security_group.firewall (expand)
-  local.instance_id (expand)
-  openstack_floating_ip.random (expand)
-  output.instance_id (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
-  provider["registry.terraform.io/hashicorp/openstack"]
-  var.foo
+  output.instance_id
 openstack_floating_ip.random (expand)
   provider["registry.terraform.io/hashicorp/openstack"]
-output.instance_id (expand)
+output.instance_id
   local.instance_id (expand)
 provider["registry.terraform.io/hashicorp/aws"]
   openstack_floating_ip.random (expand)
 provider["registry.terraform.io/hashicorp/aws"] (close)
-  aws_instance.web (expand)
   aws_load_balancer.weblb (expand)
-  aws_security_group.firewall (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
 provider["registry.terraform.io/hashicorp/openstack"]
 provider["registry.terraform.io/hashicorp/openstack"] (close)
   openstack_floating_ip.random (expand)
-  provider["registry.terraform.io/hashicorp/openstack"]
 root
   meta.count-boundary (EachMode fixup)
   provider["registry.terraform.io/hashicorp/aws"] (close)
@@ -342,7 +287,6 @@ aws_instance.bar2 (expand)
   provider["registry.terraform.io/hashicorp/aws"]
 aws_instance.bat (expand)
   aws_instance.boo (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
 aws_instance.baz (expand)
   provider["registry.terraform.io/hashicorp/aws"]
 aws_instance.boo (expand)
@@ -354,18 +298,14 @@ meta.count-boundary (EachMode fixup)
   aws_instance.bar2 (expand)
   aws_instance.bat (expand)
   aws_instance.baz (expand)
-  aws_instance.boo (expand)
   aws_instance.foo (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
 provider["registry.terraform.io/hashicorp/aws"]
 provider["registry.terraform.io/hashicorp/aws"] (close)
   aws_instance.bar (expand)
   aws_instance.bar2 (expand)
   aws_instance.bat (expand)
   aws_instance.baz (expand)
-  aws_instance.boo (expand)
   aws_instance.foo (expand)
-  provider["registry.terraform.io/hashicorp/aws"]
 root
   meta.count-boundary (EachMode fixup)
   provider["registry.terraform.io/hashicorp/aws"] (close)

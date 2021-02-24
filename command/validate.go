@@ -17,8 +17,6 @@ type ValidateCommand struct {
 	Meta
 }
 
-const defaultPath = "."
-
 func (c *ValidateCommand) Run(args []string) int {
 	args = c.Meta.process(args)
 	// TODO: The `var` and `var-file` options are not actually used, and should
@@ -79,6 +77,12 @@ func (c *ValidateCommand) Run(args []string) int {
 	validateDiags := c.validate(dir)
 	diags = diags.Append(validateDiags)
 
+	// Validating with dev overrides in effect means that the result might
+	// not be valid for a stable release, so we'll warn about that in case
+	// the user is trying to use "terraform validate" as a sort of pre-flight
+	// check before submitting a change.
+	diags = diags.Append(c.providerDevOverrideRuntimeWarnings())
+
 	return c.showResults(diags, jsonOutput)
 }
 
@@ -110,7 +114,11 @@ func (c *ValidateCommand) validate(dir string) tfdiags.Diagnostics {
 		}
 	}
 
-	opts := c.contextOpts()
+	opts, err := c.contextOpts()
+	if err != nil {
+		diags = diags.Append(err)
+		return diags
+	}
 	opts.Config = cfg
 	opts.Variables = varValues
 
@@ -227,12 +235,12 @@ func (c *ValidateCommand) showResults(diags tfdiags.Diagnostics, jsonOutput bool
 }
 
 func (c *ValidateCommand) Synopsis() string {
-	return "Validates the Terraform files"
+	return "Check whether the configuration is valid"
 }
 
 func (c *ValidateCommand) Help() string {
 	helpText := `
-Usage: terraform validate [options] [dir]
+Usage: terraform [global options] validate [options] [dir]
 
   Validate the configuration files in a directory, referring only to the
   configuration and not accessing any remote services such as remote state,

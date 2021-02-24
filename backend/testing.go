@@ -12,7 +12,6 @@ import (
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/hcl2shim"
-	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/hashicorp/terraform/tfdiags"
@@ -95,7 +94,7 @@ func TestBackendStates(t *testing.T, b Backend) {
 
 	// Test it starts with only the default
 	if !noDefault && (len(workspaces) != 1 || workspaces[0] != DefaultStateName) {
-		t.Fatalf("should only default to start: %#v", workspaces)
+		t.Fatalf("should only have the default workspace to start: %#v", workspaces)
 	}
 
 	// Create a couple states
@@ -151,7 +150,7 @@ func TestBackendStates(t *testing.T, b Backend) {
 				SchemaVersion: 0,
 			},
 			addrs.AbsProviderConfig{
-				Provider: addrs.NewLegacyProvider("test"),
+				Provider: addrs.NewDefaultProvider("test"),
 				Module:   addrs.RootModule,
 			},
 		)
@@ -280,7 +279,27 @@ func TestBackendStateForceUnlock(t *testing.T, b1, b2 Backend) {
 	testLocks(t, b1, b2, true)
 }
 
+// TestBackendStateLocksInWS will test the locking functionality of the remote
+// state backend.
+func TestBackendStateLocksInWS(t *testing.T, b1, b2 Backend, ws string) {
+	t.Helper()
+	testLocksInWorkspace(t, b1, b2, false, ws)
+}
+
+// TestBackendStateForceUnlockInWS verifies that the lock error is the expected
+// type, and the lock can be unlocked using the ID reported in the error.
+// Remote state backends that support -force-unlock should call this in at
+// least one of the acceptance tests.
+func TestBackendStateForceUnlockInWS(t *testing.T, b1, b2 Backend, ws string) {
+	t.Helper()
+	testLocksInWorkspace(t, b1, b2, true, ws)
+}
+
 func testLocks(t *testing.T, b1, b2 Backend, testForceUnlock bool) {
+	testLocksInWorkspace(t, b1, b2, testForceUnlock, DefaultStateName)
+}
+
+func testLocksInWorkspace(t *testing.T, b1, b2 Backend, testForceUnlock bool, workspace string) {
 	t.Helper()
 
 	// Get the default state for each
@@ -293,7 +312,7 @@ func testLocks(t *testing.T, b1, b2 Backend, testForceUnlock bool) {
 	}
 
 	// Fast exit if this doesn't support locking at all
-	if _, ok := b1StateMgr.(state.Locker); !ok {
+	if _, ok := b1StateMgr.(statemgr.Locker); !ok {
 		t.Logf("TestBackend: backend %T doesn't support state locking, not testing", b1)
 		return
 	}
@@ -309,14 +328,14 @@ func testLocks(t *testing.T, b1, b2 Backend, testForceUnlock bool) {
 	}
 
 	// Reassign so its obvious whats happening
-	lockerA := b1StateMgr.(state.Locker)
-	lockerB := b2StateMgr.(state.Locker)
+	lockerA := b1StateMgr.(statemgr.Locker)
+	lockerB := b2StateMgr.(statemgr.Locker)
 
-	infoA := state.NewLockInfo()
+	infoA := statemgr.NewLockInfo()
 	infoA.Operation = "test"
 	infoA.Who = "clientA"
 
-	infoB := state.NewLockInfo()
+	infoB := statemgr.NewLockInfo()
 	infoB.Operation = "test"
 	infoB.Who = "clientB"
 
@@ -325,7 +344,7 @@ func testLocks(t *testing.T, b1, b2 Backend, testForceUnlock bool) {
 		t.Fatal("unable to get initial lock:", err)
 	}
 
-	// Make sure we can still get the state.State from another instance even
+	// Make sure we can still get the statemgr.Full from another instance even
 	// when locked.  This should only happen when a state is loaded via the
 	// backend, and as a remote state.
 	_, err = b2.StateMgr(DefaultStateName)

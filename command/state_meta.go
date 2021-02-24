@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform/addrs"
-	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/hashicorp/terraform/tfdiags"
@@ -23,8 +22,8 @@ type StateMeta struct {
 // the backend, but changes the way that backups are done. This configures
 // backups to be timestamped rather than just the original state path plus a
 // backup path.
-func (c *StateMeta) State() (state.State, error) {
-	var realState state.State
+func (c *StateMeta) State() (statemgr.Full, error) {
+	var realState statemgr.Full
 	backupPath := c.backupPath
 	stateOutPath := c.statePath
 
@@ -38,7 +37,18 @@ func (c *StateMeta) State() (state.State, error) {
 			return nil, backendDiags.Err()
 		}
 
-		workspace := c.Workspace()
+		workspace, err := c.Workspace()
+		if err != nil {
+			return nil, err
+		}
+
+		// Check remote Terraform version is compatible
+		remoteVersionDiags := c.remoteBackendVersionCheck(b, workspace)
+		c.showDiagnostics(remoteVersionDiags)
+		if remoteVersionDiags.HasErrors() {
+			return nil, fmt.Errorf("Error checking remote Terraform version")
+		}
+
 		// Get the state
 		s, err := b.StateMgr(workspace)
 		if err != nil {
@@ -93,24 +103,32 @@ func (c *StateMeta) lookupResourceInstanceAddr(state *states.State, allowMissing
 	case addrs.ModuleInstance:
 		// Matches all instances within the indicated module and all of its
 		// descendent modules.
+
+		// found is used to identify cases where the selected module has no
+		// resources, but one or more of its submodules does.
+		found := false
 		ms := state.Module(addr)
-		if ms == nil {
-			if !allowMissing {
-				diags = diags.Append(tfdiags.Sourceless(
-					tfdiags.Error,
-					"Unknown module",
-					fmt.Sprintf(`The current state contains no module at %s. If you've just added this module to the configuration, you must run "terraform apply" first to create the module's entry in the state.`, addr),
-				))
-			}
-			break
+		if ms != nil {
+			found = true
+			ret = append(ret, c.collectModuleResourceInstances(ms)...)
 		}
-		ret = append(ret, c.collectModuleResourceInstances(ms)...)
 		for _, cms := range state.Modules {
-			candidateAddr := ms.Addr
-			if len(candidateAddr) > len(addr) && candidateAddr[:len(addr)].Equal(addr) {
-				ret = append(ret, c.collectModuleResourceInstances(cms)...)
+			if !addr.Equal(cms.Addr) {
+				if addr.IsAncestor(cms.Addr) || addr.TargetContains(cms.Addr) {
+					found = true
+					ret = append(ret, c.collectModuleResourceInstances(cms)...)
+				}
 			}
 		}
+
+		if found == false && !allowMissing {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Unknown module",
+				fmt.Sprintf(`The current state contains no module at %s. If you've just added this module to the configuration, you must run "terraform apply" first to create the module's entry in the state.`, addr),
+			))
+		}
+
 	case addrs.AbsResource:
 		// Matches all instances of the specific selected resource.
 		rs := state.Resource(addr)
@@ -144,10 +162,6 @@ func (c *StateMeta) lookupResourceInstanceAddr(state *states.State, allowMissing
 	})
 
 	return ret, diags
-}
-
-func (c *StateMeta) lookupSingleResourceInstanceAddr(state *states.State, addrStr string) (addrs.AbsResourceInstance, tfdiags.Diagnostics) {
-	return addrs.ParseAbsResourceInstanceStr(addrStr)
 }
 
 func (c *StateMeta) lookupSingleStateObjectAddr(state *states.State, addrStr string) (addrs.Targetable, tfdiags.Diagnostics) {

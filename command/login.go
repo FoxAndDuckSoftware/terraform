@@ -249,7 +249,7 @@ func (c *LoginCommand) Help() string {
 	}
 
 	helpText := fmt.Sprintf(`
-Usage: terraform login [hostname]
+Usage: terraform [global options] login [hostname]
 
   Retrieves an authentication token for the given hostname, if it supports
   automatic login, and saves it in a credentials file in your home directory.
@@ -383,6 +383,7 @@ func (c *LoginCommand) interactiveGetTokenByCode(hostname svchost.Hostname, cred
 		ClientID:    clientConfig.ID,
 		Endpoint:    clientConfig.Endpoint(),
 		RedirectURL: callbackURL,
+		Scopes:      clientConfig.Scopes,
 	}
 
 	authCodeURL := oauthConfig.AuthCodeURL(
@@ -475,6 +476,7 @@ func (c *LoginCommand) interactiveGetTokenByPassword(hostname svchost.Hostname, 
 	oauthConfig := &oauth2.Config{
 		ClientID: clientConfig.ID,
 		Endpoint: clientConfig.Endpoint(),
+		Scopes:   clientConfig.Scopes,
 	}
 	token, err := oauthConfig.PasswordCredentialsToken(context.Background(), username, password)
 	if err != nil {

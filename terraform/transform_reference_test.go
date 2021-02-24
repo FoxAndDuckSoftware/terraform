@@ -68,12 +68,12 @@ func TestReferenceTransformer_path(t *testing.T) {
 	})
 	g.Add(&graphNodeRefParentTest{
 		NameValue: "child.A",
-		PathValue: []string{"root", "child"},
+		PathValue: addrs.ModuleInstance{addrs.ModuleInstanceStep{Name: "child"}},
 		Names:     []string{"A"},
 	})
 	g.Add(&graphNodeRefChildTest{
 		NameValue: "child.B",
-		PathValue: []string{"root", "child"},
+		PathValue: addrs.ModuleInstance{addrs.ModuleInstanceStep{Name: "child"}},
 		Refs:      []string{"A"},
 	})
 
@@ -84,6 +84,89 @@ func TestReferenceTransformer_path(t *testing.T) {
 
 	actual := strings.TrimSpace(g.String())
 	expected := strings.TrimSpace(testTransformRefPathStr)
+	if actual != expected {
+		t.Fatalf("wrong result\n\ngot:\n%s\n\nwant:\n%s", actual, expected)
+	}
+}
+
+func TestReferenceTransformer_resourceInstances(t *testing.T) {
+	// Our reference analyses are all done based on unexpanded addresses
+	// so that we can use this transformer both in the plan graph (where things
+	// are not expanded yet) and the apply graph (where resource instances are
+	// pre-expanded but nothing else is.)
+	// However, that would make the result too conservative about instances
+	// of the same resource in different instances of the same module, so we
+	// make an exception for that situation in particular, keeping references
+	// between resource instances segregated by their containing module
+	// instance.
+	g := Graph{Path: addrs.RootModuleInstance}
+	moduleInsts := []addrs.ModuleInstance{
+		{
+			{
+				Name: "foo", InstanceKey: addrs.IntKey(0),
+			},
+		},
+		{
+			{
+				Name: "foo", InstanceKey: addrs.IntKey(1),
+			},
+		},
+	}
+	resourceAs := make([]addrs.AbsResourceInstance, len(moduleInsts))
+	for i, moduleInst := range moduleInsts {
+		resourceAs[i] = addrs.Resource{
+			Mode: addrs.ManagedResourceMode,
+			Type: "thing",
+			Name: "a",
+		}.Instance(addrs.NoKey).Absolute(moduleInst)
+	}
+	resourceBs := make([]addrs.AbsResourceInstance, len(moduleInsts))
+	for i, moduleInst := range moduleInsts {
+		resourceBs[i] = addrs.Resource{
+			Mode: addrs.ManagedResourceMode,
+			Type: "thing",
+			Name: "b",
+		}.Instance(addrs.NoKey).Absolute(moduleInst)
+	}
+	g.Add(&graphNodeFakeResourceInstance{
+		Addr: resourceAs[0],
+	})
+	g.Add(&graphNodeFakeResourceInstance{
+		Addr: resourceBs[0],
+		Refs: []*addrs.Reference{
+			{
+				Subject: resourceAs[0].Resource,
+			},
+		},
+	})
+	g.Add(&graphNodeFakeResourceInstance{
+		Addr: resourceAs[1],
+	})
+	g.Add(&graphNodeFakeResourceInstance{
+		Addr: resourceBs[1],
+		Refs: []*addrs.Reference{
+			{
+				Subject: resourceAs[1].Resource,
+			},
+		},
+	})
+
+	tf := &ReferenceTransformer{}
+	if err := tf.Transform(&g); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	// Resource B should be connected to resource A in each module instance,
+	// but there should be no connections between the two module instances.
+	actual := strings.TrimSpace(g.String())
+	expected := strings.TrimSpace(`
+module.foo[0].thing.a
+module.foo[0].thing.b
+  module.foo[0].thing.a
+module.foo[1].thing.a
+module.foo[1].thing.b
+  module.foo[1].thing.a
+`)
 	if actual != expected {
 		t.Fatalf("wrong result\n\ngot:\n%s\n\nwant:\n%s", actual, expected)
 	}
@@ -131,7 +214,7 @@ func TestReferenceMapReferences(t *testing.T) {
 
 type graphNodeRefParentTest struct {
 	NameValue string
-	PathValue []string
+	PathValue addrs.ModuleInstance
 	Names     []string
 }
 
@@ -150,16 +233,16 @@ func (n *graphNodeRefParentTest) ReferenceableAddrs() []addrs.Referenceable {
 }
 
 func (n *graphNodeRefParentTest) Path() addrs.ModuleInstance {
-	return normalizeModulePath(n.PathValue)
+	return n.PathValue
 }
 
 func (n *graphNodeRefParentTest) ModulePath() addrs.Module {
-	return normalizeModulePath(n.PathValue).Module()
+	return n.PathValue.Module()
 }
 
 type graphNodeRefChildTest struct {
 	NameValue string
-	PathValue []string
+	PathValue addrs.ModuleInstance
 	Refs      []string
 }
 
@@ -180,33 +263,47 @@ func (n *graphNodeRefChildTest) References() []*addrs.Reference {
 }
 
 func (n *graphNodeRefChildTest) Path() addrs.ModuleInstance {
-	return normalizeModulePath(n.PathValue)
+	return n.PathValue
 }
 
 func (n *graphNodeRefChildTest) ModulePath() addrs.Module {
-	return normalizeModulePath(n.PathValue).Module()
+	return n.PathValue.Module()
+}
+
+type graphNodeFakeResourceInstance struct {
+	Addr addrs.AbsResourceInstance
+	Refs []*addrs.Reference
+}
+
+var _ GraphNodeResourceInstance = (*graphNodeFakeResourceInstance)(nil)
+var _ GraphNodeReferenceable = (*graphNodeFakeResourceInstance)(nil)
+var _ GraphNodeReferencer = (*graphNodeFakeResourceInstance)(nil)
+
+func (n *graphNodeFakeResourceInstance) ResourceInstanceAddr() addrs.AbsResourceInstance {
+	return n.Addr
+}
+
+func (n *graphNodeFakeResourceInstance) ModulePath() addrs.Module {
+	return n.Addr.Module.Module()
+}
+
+func (n *graphNodeFakeResourceInstance) ReferenceableAddrs() []addrs.Referenceable {
+	return []addrs.Referenceable{n.Addr.Resource}
+}
+
+func (n *graphNodeFakeResourceInstance) References() []*addrs.Reference {
+	return n.Refs
+}
+
+func (n *graphNodeFakeResourceInstance) StateDependencies() []addrs.ConfigResource {
+	return nil
+}
+
+func (n *graphNodeFakeResourceInstance) String() string {
+	return n.Addr.String()
 }
 
 const testTransformRefBasicStr = `
-A
-B
-  A
-`
-
-const testTransformRefBackupStr = `
-A
-B
-  A
-`
-
-const testTransformRefBackupPrimaryStr = `
-A
-B
-  C
-C
-`
-
-const testTransformRefModulePathStr = `
 A
 B
   A

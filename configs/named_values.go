@@ -5,13 +5,13 @@ import (
 	"unicode"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 
 	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/internal/typeexpr"
 )
 
 // A consistent detail message for all "not a valid identifier" diagnostics.
@@ -25,8 +25,10 @@ type Variable struct {
 	Type        cty.Type
 	ParsingMode VariableParsingMode
 	Validations []*VariableValidation
+	Sensitive   bool
 
 	DescriptionSet bool
+	SensitiveSet   bool
 
 	DeclRange hcl.Range
 }
@@ -94,6 +96,12 @@ func decodeVariableBlock(block *hcl.Block, override bool) (*Variable, hcl.Diagno
 		v.ParsingMode = parseMode
 	}
 
+	if attr, exists := content.Attributes["sensitive"]; exists {
+		valDiags := gohcl.DecodeExpression(attr.Expr, nil, &v.Sensitive)
+		diags = append(diags, valDiags...)
+		v.SensitiveSet = true
+	}
+
 	if attr, exists := content.Attributes["default"]; exists {
 		val, valDiags := attr.Expr.Value(nil)
 		diags = append(diags, valDiags...)
@@ -141,12 +149,12 @@ func decodeVariableBlock(block *hcl.Block, override bool) (*Variable, hcl.Diagno
 
 func decodeVariableType(expr hcl.Expression) (cty.Type, VariableParsingMode, hcl.Diagnostics) {
 	if exprIsNativeQuotedString(expr) {
-		// Here we're accepting the pre-0.12 form of variable type argument where
-		// the string values "string", "list" and "map" are accepted has a hint
-		// about the type used primarily for deciding how to parse values
-		// given on the command line and in environment variables.
+		// If a user provides the pre-0.12 form of variable type argument where
+		// the string values "string", "list" and "map" are accepted, we
+		// provide an error to point the user towards using the type system
+		// correctly has a hint.
 		// Only the native syntax ends up in this codepath; we handle the
-		// JSON syntax (which is, of course, quoted even in the new format)
+		// JSON syntax (which is, of course, quoted within the type system)
 		// in the normal codepath below.
 		val, diags := expr.Value(nil)
 		if diags.HasErrors() {
@@ -156,33 +164,33 @@ func decodeVariableType(expr hcl.Expression) (cty.Type, VariableParsingMode, hcl
 		switch str {
 		case "string":
 			diags = append(diags, &hcl.Diagnostic{
-				Severity: hcl.DiagWarning,
-				Summary:  "Quoted type constraints are deprecated",
-				Detail:   "Terraform 0.11 and earlier required type constraints to be given in quotes, but that form is now deprecated and will be removed in a future version of Terraform. To silence this warning, remove the quotes around \"string\".",
+				Severity: hcl.DiagError,
+				Summary:  "Invalid quoted type constraints",
+				Detail:   "Terraform 0.11 and earlier required type constraints to be given in quotes, but that form is now deprecated and will be removed in a future version of Terraform. Remove the quotes around \"string\".",
 				Subject:  expr.Range().Ptr(),
 			})
-			return cty.String, VariableParseLiteral, diags
+			return cty.DynamicPseudoType, VariableParseLiteral, diags
 		case "list":
 			diags = append(diags, &hcl.Diagnostic{
-				Severity: hcl.DiagWarning,
-				Summary:  "Quoted type constraints are deprecated",
-				Detail:   "Terraform 0.11 and earlier required type constraints to be given in quotes, but that form is now deprecated and will be removed in a future version of Terraform. To silence this warning, remove the quotes around \"list\" and write list(string) instead to explicitly indicate that the list elements are strings.",
+				Severity: hcl.DiagError,
+				Summary:  "Invalid quoted type constraints",
+				Detail:   "Terraform 0.11 and earlier required type constraints to be given in quotes, but that form is now deprecated and will be removed in a future version of Terraform. Remove the quotes around \"list\" and write list(string) instead to explicitly indicate that the list elements are strings.",
 				Subject:  expr.Range().Ptr(),
 			})
-			return cty.List(cty.DynamicPseudoType), VariableParseHCL, diags
+			return cty.DynamicPseudoType, VariableParseHCL, diags
 		case "map":
 			diags = append(diags, &hcl.Diagnostic{
-				Severity: hcl.DiagWarning,
-				Summary:  "Quoted type constraints are deprecated",
-				Detail:   "Terraform 0.11 and earlier required type constraints to be given in quotes, but that form is now deprecated and will be removed in a future version of Terraform. To silence this warning, remove the quotes around \"map\" and write map(string) instead to explicitly indicate that the map elements are strings.",
+				Severity: hcl.DiagError,
+				Summary:  "Invalid quoted type constraints",
+				Detail:   "Terraform 0.11 and earlier required type constraints to be given in quotes, but that form is now deprecated and will be removed in a future version of Terraform. Remove the quotes around \"map\" and write map(string) instead to explicitly indicate that the map elements are strings.",
 				Subject:  expr.Range().Ptr(),
 			})
-			return cty.Map(cty.DynamicPseudoType), VariableParseHCL, diags
+			return cty.DynamicPseudoType, VariableParseHCL, diags
 		default:
 			return cty.DynamicPseudoType, VariableParseHCL, hcl.Diagnostics{{
 				Severity: hcl.DiagError,
 				Summary:  "Invalid legacy variable type hint",
-				Detail:   `The legacy variable type hint form, using a quoted string, allows only the values "string", "list", and "map". To provide a full type expression, remove the surrounding quotes and give the type expression directly.`,
+				Detail:   `To provide a full type expression, remove the surrounding quotes and give the type expression directly.`,
 				Subject:  expr.Range().Ptr(),
 			}}
 		}
@@ -433,6 +441,8 @@ type Output struct {
 }
 
 func decodeOutputBlock(block *hcl.Block, override bool) (*Output, hcl.Diagnostics) {
+	var diags hcl.Diagnostics
+
 	o := &Output{
 		Name:      block.Labels[0],
 		DeclRange: block.DefRange,
@@ -443,7 +453,8 @@ func decodeOutputBlock(block *hcl.Block, override bool) (*Output, hcl.Diagnostic
 		schema = schemaForOverrides(schema)
 	}
 
-	content, diags := block.Body.Content(schema)
+	content, moreDiags := block.Body.Content(schema)
+	diags = append(diags, moreDiags...)
 
 	if !hclsyntax.ValidIdentifier(o.Name) {
 		diags = append(diags, &hcl.Diagnostic{
@@ -533,6 +544,9 @@ var variableBlockSchema = &hcl.BodySchema{
 		},
 		{
 			Name: "type",
+		},
+		{
+			Name: "sensitive",
 		},
 	},
 	Blocks: []hcl.BlockHeaderSchema{

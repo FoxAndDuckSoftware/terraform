@@ -7,7 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/helper/wrappedstreams"
+	"github.com/hashicorp/terraform/internal/helper/wrappedstreams"
 	"github.com/hashicorp/terraform/repl"
 	"github.com/hashicorp/terraform/tfdiags"
 
@@ -35,6 +35,7 @@ func (c *ConsoleCommand) Run(args []string) int {
 		c.Ui.Error(err.Error())
 		return 1
 	}
+	configPath = c.Meta.normalizePath(configPath)
 
 	// Check for user-supplied plugin path
 	if c.pluginPath, err = c.loadPluginPath(); err != nil {
@@ -69,6 +70,9 @@ func (c *ConsoleCommand) Run(args []string) int {
 		return 1
 	}
 
+	// This is a read-only command
+	c.ignoreRemoteBackendVersionConflict(b)
+
 	// Build the operation
 	opReq := c.Operation(b)
 	opReq.ConfigDir = configPath
@@ -92,22 +96,21 @@ func (c *ConsoleCommand) Run(args []string) int {
 
 	// Get the context
 	ctx, _, ctxDiags := local.Context(opReq)
-
-	// Creating the context can result in a lock, so ensure we release it
-	defer func() {
-		err := opReq.StateLocker.Unlock(nil)
-		if err != nil {
-			c.Ui.Error(err.Error())
-		}
-	}()
-
 	diags = diags.Append(ctxDiags)
 	if ctxDiags.HasErrors() {
 		c.showDiagnostics(diags)
 		return 1
 	}
 
-	// Setup the UI so we can output directly to stdout
+	// Successfully creating the context can result in a lock, so ensure we release it
+	defer func() {
+		diags := opReq.StateLocker.Unlock()
+		if diags.HasErrors() {
+			c.showDiagnostics(diags)
+		}
+	}()
+
+	// Set up the UI so we can output directly to stdout
 	ui := &cli.BasicUi{
 		Writer:      wrappedstreams.Stdout(),
 		ErrorWriter: wrappedstreams.Stderr(),
@@ -172,7 +175,7 @@ func (c *ConsoleCommand) modePiped(session *repl.Session, ui cli.Ui) int {
 
 func (c *ConsoleCommand) Help() string {
 	helpText := `
-Usage: terraform console [options] [DIR]
+Usage: terraform [global options] console [options]
 
   Starts an interactive console for experimenting with Terraform
   interpolations.
@@ -183,9 +186,6 @@ Usage: terraform console [options] [DIR]
   using them in future configurations.
 
   This command will never modify your state.
-
-  DIR can be set to a directory with a Terraform state to load. By
-  default, this will default to the current working directory.
 
 Options:
 
@@ -204,5 +204,5 @@ Options:
 }
 
 func (c *ConsoleCommand) Synopsis() string {
-	return "Interactive console for Terraform interpolations"
+	return "Try Terraform expressions at an interactive command prompt"
 }
